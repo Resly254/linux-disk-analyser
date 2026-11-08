@@ -1,84 +1,144 @@
-#!/bin/bash
+import os
 import json
-from datetime import datetime
 import shutil
+import logging
+import argparse
+
+from pathlib import Path
 from datetime import datetime
 
-def check_disk(path="/"):
-    total, used, free = shutil.disk_usage(path)
 
-    used_percent = (used / total) * 100
+REPORT_DIR = Path("reports")
+LOG_DIR = Path("logs")
 
-    print("Linux Disk Growth Investigator")
-    print("------------------------------")
-    print(f"Checked at: {datetime.now()}")
-    print(f"Location: {path}")
-    print(f"Total space: {total / (1024**3):.2f} GB")
-    print(f"Used space: {used / (1024**3):.2f} GB")
-    print(f"Free space: {free / (1024**3):.2f} GB")
-    print(f"Usage: {used_percent:.1f}%")
+REPORT_DIR.mkdir(exist_ok=True)
+LOG_DIR.mkdir(exist_ok=True)
 
-    if used_percent >= 80:
-        print("WARNING: Disk usage is high!")
-    else:
-        print("Disk usage is within the configured limit.")
-    report = {
-        "checked_at": str(datetime.now()),
-        "location": path,
-        "total_gb": round(total / (1024**3), 2),
-        "used_gb": round(used / (1024**3), 2),
-        "free_gb": round(free / (1024**3), 2),
-        "usage_percent": round(used_percent, 1)
-    }
-    save_report(path("~/"), report)
+logging.basicConfig(
+    filename=LOG_DIR / "investigator.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
-def find_large_directories(path=".", limit=10):
-    root = Path(path).expanduser()
 
-    if not root.is_dir():
-        print(f"Error: {root} is not a valid directory.")
-        return
+def get_directory_size(directory):
+    total_size = 0
 
-    directory_sizes = []
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [
+            d for d in dirs
+            if d not in {"proc", "sys", "dev", "run"}
+        ]
 
-    for item in root.iterdir():
-        if item.is_dir() and not item.is_symlink():
-            total_size = 0
-
+        for file in files:
             try:
-                for file in item.rglob("*"):
-                    if file.is_file() and not file.is_symlink():
-                        try:
-                            total_size += file.stat().st_size
-                        except OSError:
-                            continue
+                file_path = Path(root) / file
+                total_size += file_path.stat().st_size
+            except (OSError, PermissionError):
+                continue
 
-                directory_sizes.append((item.name, total_size))
+    return total_size
+
+
+def investigate_disk(path, threshold=80, top_n=5):
+
+    target = Path(path)
+
+    if not target.exists() or not target.is_dir():
+        raise ValueError(f"Invalid directory: {path}")
+
+    disk = shutil.disk_usage(target)
+
+    used_percent = round(
+        (disk.used / disk.total) * 100, 2
+    )
+
+    directories = []
+
+    for item in target.iterdir():
+
+        if item.is_dir() and item.name not in {
+            "proc", "sys", "dev", "run"
+        }:
+            try:
+                size = get_directory_size(item)
+
+                directories.append({
+                    "directory": str(item),
+                    "size_bytes": size
+                })
 
             except OSError:
-                print(f"Skipped inaccessible directory: {item.name}")
+                continue
 
-    directory_sizes.sort(key=lambda entry: entry[1], reverse=True)
+    directories.sort(
+        key=lambda x: x["size_bytes"],
+        reverse=True
+    )
 
-    print("\nLargest directories")
-    print("-------------------")
+    status = (
+        "WARNING"
+        if used_percent >= threshold
+        else "HEALTHY"
+    )
 
-    for name, size in directory_sizes[:limit]:
-        print(f"{name}: {size / (1024**2):.2f} MB")
-
-if __name__ == "__main__":
-    check_disk()
-    find_large_directories("~/")      
-
-def save_report(path, report):
-    output_dir = Path("reports")
-    output_dir.mkdir(exist_ok=True)
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "monitored_path": str(target.resolve()),
+        "total_bytes": disk.total,
+        "used_bytes": disk.used,
+        "free_bytes": disk.free,
+        "usage_percentage": used_percent,
+        "threshold_percentage": threshold,
+        "status": status,
+        "largest_directories": directories[:top_n]
+    }
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_file = output_dir / f"report_{timestamp}.json"
 
-    with report_file.open("w", encoding="utf-8") as file:
+    report_file = REPORT_DIR / f"report_{timestamp}.json"
+
+    with open(report_file, "w") as file:
         json.dump(report, file, indent=4)
 
-    print(f"\nReport saved to: {report_file}")    
-    save_report(path("~/"), report)
+    logging.info(
+        f"Investigation completed. Status: {status}"
+    )
+
+    print(json.dumps(report, indent=4))
+    print(f"\nReport saved to: {report_file}")
+
+    return report
+
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(
+        description="Linux Disk Growth Investigator"
+    )
+
+    parser.add_argument(
+        "--path",
+        default=os.getenv("DISK_PATH", "/"),
+        help="Directory to investigate"
+    )
+
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=80
+    )
+
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=5
+    )
+
+    args = parser.parse_args()
+
+    investigate_disk(
+        args.path,
+        args.threshold,
+        args.top
+    )
