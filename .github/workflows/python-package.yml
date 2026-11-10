@@ -35,5 +35,11 @@ jobs:
     - name: Test with pytest
       run: |
         pytest
-    - name: Build Docker image
-      run: docker build -t myapp:latest .
+  
+    - name: Build and push
+      uses: docker/build-push-action@v7
+      with:
+          push: true
+          tags: thangicia/melvinresly-254
+          secrets: |
+            GIT_AUTH_TOKEN=${{ secrets.MYTOKEN }}
